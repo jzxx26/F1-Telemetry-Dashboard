@@ -10,6 +10,23 @@ has one line per item with the details.
 
 ## [Unreleased]
 
+### Added
+
+- Live page **Strategy** tab: where a car would rejoin if it pitted now, from the
+  live timing order. Lapped cars are placed by chaining intervals, a car in the
+  pit lane or a missing gap gives a position range instead of a guess, and
+  SC/VSC/red flag are reported as unsupported. A pit-loss slider starts at the
+  race's median pit lane time (`PitLaneTimeCollection`, kept by the adapter
+  because the feed deletes each stop after ~20 s), else the circuit figure.
+  It also shows the margin to the next place either way, scenarios at ±2 s,
+  and a stale-timing warning. No new connection, topic or request. See
+  `docs/pit-strategy.md`.
+
+### Fixed
+
+- The per-circuit pit-loss figure never matched "São Paulo Grand Prix": the
+  lookup now ignores accents.
+
 ## [0.9.0] - 2026-10-02
 
 The first versioned release. It collects the eight review rounds recorded in

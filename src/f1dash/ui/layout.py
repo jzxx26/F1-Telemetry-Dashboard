@@ -996,7 +996,7 @@ def poll_live(data_manager, delay: float) -> dict:
     return data_manager.poll_live_data()
 
 
-LIVE_TABS = ["Telemetry", "Tyres", "Race control", "Weather"]
+LIVE_TABS = ["Telemetry", "Tyres", "Strategy", "Race control", "Weather"]
 LIVE_TAB_KEY = "live_tab"
 
 
@@ -1044,7 +1044,7 @@ def render_live_dashboard(data_manager, processor):
     # map is the dashboard's. Only the open tab is drawn (LIVE-35): with the
     # Weather tab open, the six telemetry figures used to be rebuilt every 3 s.
     tabs = st.tabs(LIVE_TABS, key=LIVE_TAB_KEY, on_change="rerun")
-    telemetry_tab, tyres_tab, race_control_tab, weather_tab = tabs
+    telemetry_tab, tyres_tab, strategy_tab, race_control_tab, weather_tab = tabs
     revision = f"live:{info.get('session_key') or info.get('gp') or 'session'}"
     if telemetry_tab.open:
         with telemetry_tab:
@@ -1061,6 +1061,12 @@ def render_live_dashboard(data_manager, processor):
             render_tire_strategy(stints_df, color_map, snapshot.get("compound_colors"))
             if not stints_df.empty:
                 st.dataframe(stints_df, width="stretch", height=250)
+    if strategy_tab.open:
+        with strategy_tab:
+            # Imported here: ui.strategy imports this module.
+            from f1dash.ui.strategy import render_pit_strategy
+
+            render_pit_strategy(snapshot)
     if race_control_tab.open:
         with race_control_tab:
             render_race_control(snapshot.get("race_control"), limit=25, key="rc:live")

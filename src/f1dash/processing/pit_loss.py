@@ -10,6 +10,8 @@ stops when there are enough of them; otherwise a per-circuit seed table, then a
 default, stands in.
 """
 
+import unicodedata
+
 import numpy as np
 import pandas as pd
 
@@ -103,7 +105,9 @@ def pit_stop_durations(
 
 def seeded_pit_loss(event_name: str | None) -> float | None:
     """The seed-table value for an event name ("Bahrain Grand Prix"), or ``None``."""
-    name = str(event_name or "").lower()
+    # Fold accents: the feed and FastF1 both say "São Paulo Grand Prix".
+    decomposed = unicodedata.normalize("NFKD", str(event_name or ""))
+    name = "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
     for word, seconds in PIT_LOSS_SEEDS.items():
         if word in name:
             return seconds
