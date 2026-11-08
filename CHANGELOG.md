@@ -15,17 +15,26 @@ has one line per item with the details.
 - Live page **Strategy** tab: where a car would rejoin if it pitted now, from the
   live timing order. Lapped cars are placed by chaining intervals, a car in the
   pit lane or a missing gap gives a position range instead of a guess, and
-  SC/VSC/red flag are reported as unsupported. A pit-loss slider starts at the
-  race's median pit lane time (`PitLaneTimeCollection`, kept by the adapter
-  because the feed deletes each stop after ~20 s), else the circuit figure.
-  It also shows the margin to the next place either way, scenarios at ±2 s,
-  and a stale-timing warning. No new connection, topic or request. See
-  `docs/pit-strategy.md`.
+  SC/VSC/red flag are reported as unsupported. The prediction adds an
+  estimated *net* pit loss, which the viewer sets (it starts at a labelled
+  generic 20 s). The race's observed pit lane time (`PitLaneTimeCollection`,
+  kept by the adapter because the feed deletes each stop after ~20 s) is shown
+  for reference, not used. It also shows the margin to the next place either
+  way, scenarios at ±2 s, and a stale-timing warning. No new connection, topic
+  or request. See `docs/pit-strategy.md`.
 
 ### Fixed
 
-- The per-circuit pit-loss figure never matched "São Paulo Grand Prix": the
-  lookup now ignores accents.
+- The Analysis page's pit rejoin predictor added the pit lane duration (or an
+  unverified per-circuit figure) to the gap as if it were the time a stop
+  loses. It now adds an estimated net pit loss, labelled as an assumption, and
+  shows the session's median pit lane time separately for reference.
+
+### Removed
+
+- `PIT_LOSS_SEEDS` and `pit_loss_for`: hand-entered circuit figures of
+  unverified meaning (21.0 s for São Paulo, against a 24.5 s median pit lane
+  time observed in the 2026 race).
 
 ## [0.9.0] - 2026-10-02
 

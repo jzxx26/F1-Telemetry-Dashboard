@@ -16,7 +16,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from f1dash.data.live_adapter import LiveDataProcessor, SignalRLiveAdapter
-from f1dash.processing.pit_loss import seeded_pit_loss
+from f1dash.processing.pit_loss import DEFAULT_NET_PIT_LOSS
 from f1dash.processing.pit_strategy import (
     LOSS_MAX_S,
     LOSS_MIN_S,
@@ -26,9 +26,10 @@ from f1dash.processing.pit_strategy import (
     UNCERTAIN,
     UNSUPPORTED,
     driver_summary,
-    live_pit_loss,
     loss_range,
     loss_scenarios,
+    net_loss_check,
+    observed_pit_lane_median,
     predict_pit_rejoin,
     race_order,
     stale_warning,
@@ -268,36 +269,70 @@ class TestMoreLossNeverHelps:
             assert best(after) >= best(before)
 
 
-class TestPitLoss:
+class TestObservedPitLaneTime:
+    """The feed's pit lane times are observed, kept for reference, never used as net loss."""
+
     def test_three_stops_give_the_race_median(self):
         times = pd.DataFrame({"Duration": [24.1, 24.5, 23.3, 30.7]})
 
-        seconds, source = live_pit_loss("São Paulo Grand Prix", times)
+        assert observed_pit_lane_median(times) == (pytest.approx(24.3), 4)
 
-        assert seconds == pytest.approx(24.3)
-        assert "median" in source and "4 stops" in source
-
-    def test_fewer_stops_fall_back_to_the_circuit_and_say_how_many(self):
-        seconds, source = live_pit_loss(
-            "São Paulo Grand Prix", pd.DataFrame({"Duration": [24.1, 24.5]})
-        )
-
-        assert seconds == seeded_pit_loss("Sao Paulo Grand Prix")
-        assert "2 stop(s)" in source
-
-    def test_the_seed_table_matches_accented_event_names(self):
-        # The feed and FastF1 both spell it with the tilde; it missed before.
-        assert seeded_pit_loss("São Paulo Grand Prix") is not None
+    def test_fewer_stops_give_no_median_and_no_stand_in(self):
+        assert observed_pit_lane_median(pd.DataFrame({"Duration": [24.1, 24.5]})) == (None, 2)
+        assert observed_pit_lane_median(None) == (None, 0)
 
     def test_drive_throughs_and_repairs_are_not_stops(self):
         times = pd.DataFrame({"Duration": [8.0, 60.0, 90.0]})
 
-        assert live_pit_loss("Unknown Grand Prix", times)[1].startswith("default")
+        assert observed_pit_lane_median(times) == (None, 0)
 
-    def test_the_slider_keeps_the_prd_range_and_widens_for_the_estimate(self):
-        assert loss_range(21.0) == (LOSS_MIN_S, LOSS_MAX_S)
+    def test_the_slider_keeps_the_prd_range_around_the_default(self):
+        assert loss_range(DEFAULT_NET_PIT_LOSS) == (LOSS_MIN_S, LOSS_MAX_S)
         low, high = loss_range(38.0)
         assert low == LOSS_MIN_S and high >= 43.0
+
+
+class TestNetPitLossIsWhatMovesTheCar:
+    """A 25 s pit lane with a 20 s net loss rejoins on 20, not 25."""
+
+    # A leads; C sits at 22.0, between a 20 s and a 25 s rejoin point.
+    FIELD = (
+        ("A", 0.0, 0.0, "ON TRACK"),
+        ("B", 5.0, 5.0, "ON TRACK"),
+        ("C", 22.0, 17.0, "ON TRACK"),
+        ("D", 40.0, 18.0, "ON TRACK"),
+    )
+
+    def test_the_prediction_adds_the_net_loss(self):
+        lane_median, _ = observed_pit_lane_median(pd.DataFrame({"Duration": [25.0] * 3}))
+        assert lane_median == 25.0
+
+        result = predict_pit_rejoin(_table(list(self.FIELD)), "A", 20.0)
+
+        assert result.net_pit_loss == 20.0
+        assert result.rejoin_gap == 20.0
+        assert (result.position, result.behind[0].driver) == (2, "C")
+
+    def test_the_pit_lane_time_would_have_cost_a_place(self):
+        result = predict_pit_rejoin(_table(list(self.FIELD)), "A", 25.0)
+
+        assert (result.position, result.ahead[0].driver) == (3, "C")
+
+    def test_a_net_loss_at_or_above_the_pit_lane_time_is_questioned(self):
+        assert net_loss_check(20.0, 25.0) is None
+        assert net_loss_check(20.0, None) is None
+        assert "at or above the observed pit lane time" in net_loss_check(25.0, 25.0)
+
+    def test_the_tab_starts_from_the_assumption_not_the_pit_lane_median(self):
+        app = AppTest.from_function(_strategy_script, args=([25.0, 25.0, 25.0],))
+        app.run()
+
+        assert not app.exception
+        assert app.slider[0].label == "Estimated net pit loss (s)"
+        assert app.slider[0].value == DEFAULT_NET_PIT_LOSS
+        captions = [c.value for c in app.caption]
+        assert any(c.startswith("Assumption.") for c in captions)
+        assert any("median pit lane time 25.0 s" in c and "not used" in c for c in captions)
 
 
 class TestDriverSummary:
@@ -438,7 +473,7 @@ class TestPanelMarkup:
         assert data_age_seconds(None, now) is None
 
 
-def _strategy_script():
+def _strategy_script(durations=(24.1, 24.5, 23.3)):
     import pandas as pd
     import streamlit as st
 
@@ -451,7 +486,7 @@ def _strategy_script():
             "standings": _standings("green"),
             "stints": pd.DataFrame(),
             "drivers": pd.DataFrame(),
-            "pit_lane_times": pd.DataFrame({"Duration": [24.1, 24.5, 23.3]}),
+            "pit_lane_times": pd.DataFrame({"Duration": list(durations)}),
             "is_live": True,
         }
     )
@@ -469,8 +504,8 @@ class TestStrategyTab:
         assert not app.exception
         assert app.session_state["rendered"]
 
-    def test_the_slider_starts_at_the_race_median(self, app):
-        assert app.slider[0].value == pytest.approx(24.1)
+    def test_the_slider_starts_at_the_net_loss_assumption(self, app):
+        assert app.slider[0].value == DEFAULT_NET_PIT_LOSS
 
     def test_the_driver_and_loss_survive_a_refresh(self, app):
         app.selectbox[0].select("VER").run()
@@ -480,12 +515,12 @@ class TestStrategyTab:
         assert app.selectbox[0].value == "VER"
         assert app.slider[0].value == 30.0
 
-    def test_use_estimate_restores_the_median(self, app):
+    def test_reset_restores_the_assumption(self, app):
         app.slider[0].set_value(30.0).run()
         app.button[0].click().run()
 
         assert not app.exception
-        assert app.slider[0].value == pytest.approx(24.1)
+        assert app.slider[0].value == DEFAULT_NET_PIT_LOSS
 
     def test_the_tab_is_on_the_live_page(self):
         from f1dash.ui.layout import LIVE_TABS
@@ -567,7 +602,7 @@ class TestScenarios:
     def test_three_scenarios_two_seconds_apart(self):
         scenarios = loss_scenarios(_table(GREEN_FIELD), "A", 21.0)
 
-        assert [s.pit_loss for s in scenarios] == [19.0, 21.0, 23.0]
+        assert [s.net_pit_loss for s in scenarios] == [19.0, 21.0, 23.0]
         assert [s.position for s in scenarios] == [3, 3, 3]
 
     def test_scenarios_cross_a_threshold(self):
@@ -577,7 +612,7 @@ class TestScenarios:
         assert [s.position for s in scenarios] == [3, 3, 4]
 
     def test_the_quicker_scenario_stops_at_zero(self):
-        assert loss_scenarios(_table(GREEN_FIELD), "A", 1.0)[0].pit_loss == 0.0
+        assert loss_scenarios(_table(GREEN_FIELD), "A", 1.0)[0].net_pit_loss == 0.0
 
     def test_the_middle_scenario_is_the_prediction(self):
         table = _table(GREEN_FIELD)
@@ -594,7 +629,7 @@ class TestScenarios:
 
         markup = scenarios_html(loss_scenarios(_standings("ver_in_pit"), "NOR", 14.0))
 
-        assert "P2–P3" in markup and "19.0" not in markup and "12.0 s loss" in markup
+        assert "P2–P3" in markup and "19.0" not in markup and "12.0 s net" in markup
 
 
 class TestStaleData:
@@ -624,8 +659,8 @@ class TestMarginCopy:
 
         lines = margin_lines(predict_pit_rejoin(_table(GREEN_FIELD), "A", 21.0))
 
-        assert lines[0].startswith("9.000 s more pit loss and D is ahead")
-        assert lines[1] == "More than 9.000 s less pit loss passes C for P2."
+        assert lines[0].startswith("9.000 s more net pit loss and D is ahead")
+        assert lines[1] == "More than 9.000 s less net pit loss passes C for P2."
 
     def test_a_range_has_no_margin_lines(self):
         from f1dash.ui.strategy import margin_lines

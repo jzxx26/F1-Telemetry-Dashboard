@@ -4,7 +4,7 @@ Rendering only. The maths is ``processing.pit_strategy``; the inputs are the
 polled live snapshot the rest of the Live page draws from (``standings``,
 ``stints``, ``drivers``, ``pit_lane_times``), so this adds no connection and
 no request. It runs inside the Live page's 3 s fragment: the driver and the
-pit loss are keyed widgets, so they survive every refresh.
+net pit loss are keyed widgets, so they survive every refresh.
 """
 
 import html
@@ -12,6 +12,7 @@ import html
 import pandas as pd
 import streamlit as st
 
+from f1dash.processing.pit_loss import DEFAULT_NET_PIT_LOSS, NET_PIT_LOSS_NOTE
 from f1dash.processing.pit_strategy import (
     OK,
     UNCERTAIN,
@@ -19,9 +20,10 @@ from f1dash.processing.pit_strategy import (
     DriverSummary,
     RejoinPrediction,
     driver_summary,
-    live_pit_loss,
     loss_range,
     loss_scenarios,
+    net_loss_check,
+    observed_pit_lane_median,
     race_order,
     stale_warning,
 )
@@ -93,7 +95,7 @@ def headline_html(prediction: RejoinPrediction) -> str:
         ("Now", f"P{prediction.current_position}" if prediction.current_position else MISSING),
         ("After the stop", after),
         ("Places", change),
-        ("Pit loss", f"{prediction.pit_loss:.1f} s"),
+        ("Net pit loss (assumed)", f"{prediction.net_pit_loss:.1f} s"),
     ]
     cells = "".join(
         f'<div class="f1-rejoin-item"><span class="f1-env-label">{_esc(label)}</span>'
@@ -112,14 +114,14 @@ def _place(prediction: RejoinPrediction) -> str:
 
 
 def margin_lines(prediction: RejoinPrediction) -> list[str]:
-    """How far the pit loss can move before the predicted place changes."""
+    """How far the net pit loss can move before the predicted place changes."""
     if prediction.position is None:
         return []
     place = f"P{prediction.position}"
     lines = []
     if prediction.loss_to_drop is not None:
         lines.append(
-            f"{prediction.loss_to_drop:.3f} s more pit loss and {prediction.drop_to} is ahead: "
+            f"{prediction.loss_to_drop:.3f} s more net pit loss and {prediction.drop_to} is ahead: "
             f"{place} is lost at that margin, since a tie goes to the car already there."
         )
     elif not prediction.behind:
@@ -130,7 +132,7 @@ def margin_lines(prediction: RejoinPrediction) -> list[str]:
         )
     if prediction.loss_to_gain is not None:
         lines.append(
-            f"More than {prediction.loss_to_gain:.3f} s less pit loss passes "
+            f"More than {prediction.loss_to_gain:.3f} s less net pit loss passes "
             f"{prediction.gain_on} for P{prediction.position - 1}."
         )
     elif prediction.position == 1:
@@ -150,7 +152,7 @@ def scenarios_html(scenarios: list[RejoinPrediction]) -> str:
     """Rejoin place for a quicker, the chosen and a slower stop (scenarios, not a confidence interval)."""
     cells = "".join(
         f'<div class="f1-rejoin-item"><span class="f1-env-label">'
-        f"{_esc(f'{s.pit_loss:.1f} s loss')}</span>"
+        f"{_esc(f'{s.net_pit_loss:.1f} s net')}</span>"
         f'<span class="f1-rejoin-value">{_esc(_place(s))}</span></div>'
         for s in scenarios
     )
@@ -210,6 +212,21 @@ def _colours(drivers: pd.DataFrame | None) -> dict[str, str]:
     }
 
 
+def observed_lane_text(median: float | None, stops: int) -> str:
+    """The observed pit lane time, kept apart from the net-loss assumption."""
+    if median is None:
+        timed = f"{stops} stop(s) timed so far, 3 needed" if stops else "no stops timed yet"
+        return (
+            f"Observed: {timed}. Pit lane times are counted from when this server "
+            "connected to the feed."
+        )
+    return (
+        f"Observed: median pit lane time {median:.1f} s over {stops} stops in this race "
+        "(pit entry to pit exit). Reference only: it is not the net loss and is not used, "
+        "because a car that stays out also needs time to cover that stretch."
+    )
+
+
 def _set_state(key: str, value) -> None:
     """Button callback: runs before the next script run, so a widget's key may be set."""
     st.session_state[key] = value
@@ -220,7 +237,7 @@ def _label(code: str, positions: dict[str, int]) -> str:
 
 
 def render_pit_strategy(snapshot: dict, key: str = "strategy") -> None:
-    """Pick a car and a pit loss; see where it would rejoin from the current order."""
+    """Pick a car and a net pit loss; see where it would rejoin from the current order."""
     info = snapshot.get("session_info") or {}
     session = info.get("session_key") or info.get("gp") or "live"
     standings = snapshot.get("standings")
@@ -238,11 +255,11 @@ def render_pit_strategy(snapshot: dict, key: str = "strategy") -> None:
     if st.session_state.get(driver_key) not in codes:
         st.session_state.pop(driver_key, None)  # a car that left the timing data
 
-    estimate, source = live_pit_loss(info.get("gp"), snapshot.get("pit_lane_times"))
-    low, high = loss_range(estimate)
-    loss_key = f"{key}_loss:{session}"
+    lane_median, lane_stops = observed_pit_lane_median(snapshot.get("pit_lane_times"))
+    low, high = loss_range(DEFAULT_NET_PIT_LOSS)
+    loss_key = f"{key}_net_loss:{session}"
     if loss_key not in st.session_state:
-        st.session_state[loss_key] = estimate
+        st.session_state[loss_key] = DEFAULT_NET_PIT_LOSS
     st.session_state[loss_key] = min(max(float(st.session_state[loss_key]), low), high)
 
     left, right = st.columns([2, 3], gap="medium")
@@ -257,24 +274,22 @@ def render_pit_strategy(snapshot: dict, key: str = "strategy") -> None:
         if summary is not None:
             st.html(summary_html(summary))
         loss = st.slider(
-            "Pit loss (s)",
+            "Estimated net pit loss (s)",
             min_value=low,
             max_value=high,
             step=0.5,
             format="%.1f",
             key=loss_key,
-            help="Time a green-flag stop costs: pit lane entry to exit, stationary time included.",
+            help=NET_PIT_LOSS_NOTE,
         )
         st.button(
-            f"Use estimate ({estimate:.1f} s)",
+            f"Reset to {DEFAULT_NET_PIT_LOSS:.1f} s",
             key=f"{key}_reset:{session}",
             on_click=_set_state,
-            args=(loss_key, estimate),
+            args=(loss_key, DEFAULT_NET_PIT_LOSS),
         )
-        st.caption(
-            f"Estimate {estimate:.1f} s: {source}. Stops are counted from when this "
-            "server connected to the feed."
-        )
+        st.caption(f"Assumption. {NET_PIT_LOSS_NOTE}")
+        st.caption(observed_lane_text(lane_median, lane_stops))
 
     age = data_age_seconds(info.get("last_heartbeat"))
     quicker, prediction, slower = loss_scenarios(
@@ -295,6 +310,9 @@ def render_pit_strategy(snapshot: dict, key: str = "strategy") -> None:
             )
             for warning in prediction.warnings:
                 st.warning(warning)
+            check = net_loss_check(loss, lane_median)
+            if check:
+                st.warning(check)
         elif prediction.status == UNSUPPORTED:
             st.info(prediction.reason.rstrip(".") + ".")
         else:

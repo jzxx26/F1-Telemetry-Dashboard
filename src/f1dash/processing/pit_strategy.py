@@ -11,9 +11,12 @@ axis continues by adding intervals down the order. Where neither is known the
 car's place on the axis is unknown, and the prediction says how many places
 that leaves open instead of guessing.
 
-A stop adds ``pit_loss`` seconds to the car's own time; everyone else is
-assumed to keep their current gap (unchanged relative pace over the stop, no
-one else pitting). Under a safety car, a VSC or a red flag a stop costs a
+A stop adds ``net_pit_loss`` seconds to the car's own time: the *net* loss,
+the pit lane duration minus the time the same stretch takes on track, never
+the pit lane duration itself (``processing.pit_loss`` defines both). The feed
+only reports pit lane durations, so the net loss is the viewer's assumption.
+Everyone else is assumed to keep their current gap (unchanged relative pace
+over the stop, no one else pitting). Under a safety car, a VSC or a red flag a stop costs a
 different, unmodelled amount, so those are marked unsupported.
 """
 
@@ -25,18 +28,16 @@ from itertools import pairwise
 
 import pandas as pd
 
-from f1dash.processing.pit_loss import MAX_STOP_S, MIN_STOP_S, seeded_pit_loss
+from f1dash.processing.pit_loss import MAX_STOP_S, MIN_STOP_S, MIN_STOPS_FOR_MEDIAN
 
 OK = "ok"
 UNCERTAIN = "uncertain"
 UNAVAILABLE = "unavailable"
 UNSUPPORTED = "unsupported"
 
-# Slider range: the PRD's 15-35 s, widened to include any estimate.
+# Net-pit-loss slider range: the PRD's 15-35 s, widened to include the value.
 LOSS_MIN_S = 15.0
 LOSS_MAX_S = 35.0
-DEFAULT_LIVE_PIT_LOSS = 21.0
-MIN_STOPS_FOR_SESSION_MEDIAN = 3
 
 # A rival within this many seconds of the rejoin point could swap places with
 # a slow stop or a quick out-lap: the position is shown, flagged as close.
@@ -63,8 +64,9 @@ PIT_STATUS = "IN PIT"
 ASSUMPTIONS = (
     "Every other car keeps its current gap to the leader: unchanged relative pace "
     "through the stop, and no one else pits.",
-    "The pit loss is the whole cost of the stop: pit lane time including the "
-    "stationary time, minus nothing for the stretch of track it bypasses.",
+    "The net pit loss is the value set on the slider: an assumption, not a "
+    "measurement. The observed pit lane time is shown beside it for reference "
+    "and is not used, since a car also spends time on that stretch when it stays out.",
     "Positions are race classification by time behind the leader, measured at "
     "the timing line; a car that rejoins next to a lapped car is not in a fight with it.",
 )
@@ -102,7 +104,7 @@ class Neighbour:
 class RejoinPrediction:
     driver: str
     status: str  # OK, UNCERTAIN, UNAVAILABLE or UNSUPPORTED
-    pit_loss: float
+    net_pit_loss: float
     reason: str = ""  # why there is no prediction (UNAVAILABLE / UNSUPPORTED)
     current_position: int | None = None
     current_gap: float | None = None
@@ -115,7 +117,7 @@ class RejoinPrediction:
     projected_order: tuple[Neighbour, ...] = ()  # everyone with a known place, in order
     warnings: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = field(default=ASSUMPTIONS)
-    # Pit-loss margins (seconds). ``loss_to_drop``: this much more loss and the
+    # Net-pit-loss margins (seconds). ``loss_to_drop``: this much more loss and the
     # car behind is ahead (at exactly this much it is a tie, which the car
     # already there wins). ``loss_to_gain``: the loss must fall by *more* than
     # this to pass the car ahead. None at the ends of the order, when that
@@ -200,22 +202,24 @@ def _bounds(running: list[OrderEntry], index: int) -> tuple[float, float]:
 def predict_pit_rejoin(
     standings: pd.DataFrame | None,
     driver: str,
-    pit_loss: float,
+    net_pit_loss: float,
     *,
     flag: str = "GREEN",
     race: bool = True,
     data_age_s: float | None = None,
     nearby: int = 2,
 ) -> RejoinPrediction:
-    """Where ``driver`` rejoins after a stop costing ``pit_loss`` seconds, from now.
+    """Where ``driver`` rejoins after a stop costing ``net_pit_loss`` seconds, from now.
 
     ``flag`` is the track's flag state (``ui.theme.FLAG_STATES`` key);
     ``data_age_s`` is how old the timing is, for the staleness warning.
     A larger loss never gives a better position (the property tests check it).
     """
-    loss = _number(pit_loss)
+    loss = _number(net_pit_loss)
     if loss is None or loss < 0:
-        return RejoinPrediction(driver, UNAVAILABLE, float("nan"), "The pit loss is not a number")
+        return RejoinPrediction(
+            driver, UNAVAILABLE, float("nan"), "The net pit loss is not a number"
+        )
 
     def no(status: str, reason: str, **extra) -> RejoinPrediction:
         return RejoinPrediction(driver, status, loss, reason, **extra)
@@ -342,7 +346,7 @@ def predict_pit_rejoin(
     return RejoinPrediction(
         driver=driver,
         status=status,
-        pit_loss=loss,
+        net_pit_loss=loss,
         loss_to_drop=to_drop,
         drop_to=drop_to,
         loss_to_gain=to_gain,
@@ -366,7 +370,7 @@ def _margins(
     ahead: tuple[Neighbour, ...],
     behind: tuple[Neighbour, ...],
 ) -> tuple[float | None, str | None, float | None, str | None]:
-    """How far the pit loss can move before the predicted place changes.
+    """How far the net pit loss can move before the predicted place changes.
 
     Ties go to the car already there, so the place is lost at exactly
     ``loss_to_drop`` more, and gained only past ``loss_to_gain`` less.
@@ -389,19 +393,19 @@ SCENARIO_STEP_S = 2.0
 def loss_scenarios(
     standings: pd.DataFrame | None,
     driver: str,
-    pit_loss: float,
+    net_pit_loss: float,
     step: float = SCENARIO_STEP_S,
     *,
     flag: str = "GREEN",
     race: bool = True,
     data_age_s: float | None = None,
 ) -> list[RejoinPrediction]:
-    """The same prediction at ``pit_loss - step``, ``pit_loss`` and ``pit_loss + step``.
+    """The same prediction at ``net_pit_loss - step``, ``net_pit_loss`` and ``net_pit_loss + step``.
 
     Scenarios for a quicker or slower stop, not a confidence interval. The
     lower one stops at zero loss; the options are :func:`predict_pit_rejoin`'s.
     """
-    losses = (max(float(pit_loss) - step, 0.0), float(pit_loss), float(pit_loss) + step)
+    losses = (max(float(net_pit_loss) - step, 0.0), float(net_pit_loss), float(net_pit_loss) + step)
     return [
         predict_pit_rejoin(standings, driver, value, flag=flag, race=race, data_age_s=data_age_s)
         for value in losses
@@ -416,29 +420,38 @@ def live_pit_stops(pit_lane_times: pd.DataFrame | None) -> list[float]:
     return [float(d) for d in durations if MIN_STOP_S <= d <= MAX_STOP_S]
 
 
-def live_pit_loss(event_name: str | None, pit_lane_times: pd.DataFrame | None) -> tuple[float, str]:
-    """``(seconds, source)``: this race's median pit lane time, else the circuit seed, else 21 s."""
+def observed_pit_lane_median(pit_lane_times: pd.DataFrame | None) -> tuple[float | None, int]:
+    """``(median seconds, stops)`` of the pit lane durations announced in this race.
+
+    Observed pit lane time, entry to exit: shown for reference, **not** a net
+    pit loss and never used as one. The median is ``None`` below three stops.
+    """
     stops = live_pit_stops(pit_lane_times)
-    if len(stops) >= MIN_STOPS_FOR_SESSION_MEDIAN:
-        median = float(pd.Series(stops).median())
-        return round(median, 1), f"median pit lane time of {len(stops)} stops in this race"
-    so_far = (
-        f"; {len(stops)} stop(s) timed in this race so far, {MIN_STOPS_FOR_SESSION_MEDIAN} "
-        "needed for a median"
-        if stops
-        else ""
-    )
-    seeded = seeded_pit_loss(event_name)
-    if seeded is not None:
-        return seeded, f"typical pit lane time for this circuit{so_far}"
-    return DEFAULT_LIVE_PIT_LOSS, f"default, with no figure for this circuit{so_far}"
+    if len(stops) < MIN_STOPS_FOR_MEDIAN:
+        return None, len(stops)
+    return round(float(pd.Series(stops).median()), 1), len(stops)
 
 
-def loss_range(estimate: float) -> tuple[float, float]:
-    """The pit-loss slider's bounds: 15-35 s, widened to keep the estimate inside with room."""
+def net_loss_check(net_pit_loss: float, pit_lane_median: float | None) -> str | None:
+    """A warning when the net loss is set at or above the observed pit lane time.
+
+    The net loss is the pit lane time minus the time the same stretch takes on
+    track, so it should be lower; a value at or above it double-counts.
+    """
+    if pit_lane_median is None or net_pit_loss < pit_lane_median:
+        return None
     return (
-        float(min(LOSS_MIN_S, math.floor(estimate - 5.0))),
-        float(max(LOSS_MAX_S, math.ceil(estimate + 5.0))),
+        f"The net pit loss ({net_pit_loss:.1f} s) is set at or above the observed pit lane "
+        f"time ({pit_lane_median:.1f} s). The net loss should be lower: it leaves out the "
+        "time a car takes over the same stretch when it stays out"
+    )
+
+
+def loss_range(value: float) -> tuple[float, float]:
+    """The net-pit-loss slider's bounds: 15-35 s, widened to keep the value inside with room."""
+    return (
+        float(min(LOSS_MIN_S, math.floor(value - 5.0))),
+        float(max(LOSS_MAX_S, math.ceil(value + 5.0))),
     )
 
 

@@ -187,7 +187,10 @@ schedule caches and the loaded sessions.
   records - never raw payloads.
 - `PitLaneTimeCollection` announces a stop's pit lane time and `_deleted`s it ~20 s later, so
   the merged state never holds the race's stops. `SignalRLiveAdapter.pit_history` keeps each
-  announcement (both entry points); the Strategy tab's pit-loss median reads that, never the state.
+  announcement (both entry points); the Strategy tab's observed pit-lane median reads that.
+- **Pit lane duration is not net pit loss.** Predictions add only the net loss (pit lane time
+  minus the on-track time for the same stretch), an assumption the viewer sets; observed pit
+  lane times are shown for reference and never used as the loss (`processing/pit_loss.py`).
 - Compressed topics (`CarData.z`, `Position.z`) are base64 + **raw DEFLATE**
   (`zlib.decompress(..., -zlib.MAX_WBITS)`), not zlib-wrapped.
 - The live tower is ordered by the timing screen via a `standings` table built from

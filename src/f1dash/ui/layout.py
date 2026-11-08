@@ -1949,8 +1949,13 @@ def render_pit_rejoin(
     lap: int | None = None,
     key: str = "pit_rejoin",
 ) -> None:
-    """Pit rejoin predictor: current gap plus the circuit's pit loss (FEAT-02)."""
-    from f1dash.processing.pit_loss import pit_loss_for, rejoin_after_lap
+    """Pit rejoin predictor: the gap at the line plus an assumed net pit loss (FEAT-02)."""
+    from f1dash.processing.pit_loss import (
+        DEFAULT_NET_PIT_LOSS,
+        NET_PIT_LOSS_NOTE,
+        median_pit_lane_duration,
+        rejoin_after_lap,
+    )
 
     if not is_race_session(session_info):
         st.info(
@@ -1963,7 +1968,7 @@ def render_pit_rejoin(
         return
     drivers = sorted(set(trace["Driver"]))
     last_lap = int(trace["LapNumber"].max())
-    loss, source = pit_loss_for((session_info or {}).get("gp"), laps, track_status)
+    lane_median, lane_stops = median_pit_lane_duration(laps, track_status)
     left, middle, right = st.columns(3)
     driver = left.selectbox(
         "Driver",
@@ -1980,19 +1985,26 @@ def render_pit_rejoin(
         key=f"{key}_lap",
     )
     seconds = right.number_input(
-        "Pit loss (s)",
+        "Estimated net pit loss (s)",
         min_value=5.0,
         max_value=60.0,
-        value=float(loss),
+        value=DEFAULT_NET_PIT_LOSS,
         step=0.5,
-        key=f"{key}_loss:{loss}",
+        key=f"{key}_net_loss",
+        help=NET_PIT_LOSS_NOTE,
     )
     result = rejoin_after_lap(laps, driver, int(at_lap), float(seconds))
     if result is None:
         st.info(f"{driver} has no timed lap {int(at_lap)}, so there is no gap to start from.")
         return
     st.markdown(rejoin_sentence(driver, int(at_lap), result))
+    observed = (
+        f"Observed: median green-flag pit lane time {lane_median:.1f} s over {lane_stops} "
+        "stops (pit entry to pit exit), shown for reference and not used."
+        if lane_median is not None
+        else f"Observed: {lane_stops} green-flag stop(s) timed, too few for a pit lane median."
+    )
     st.caption(
-        f"Pit loss {loss:.1f} s: {source}. It is the pit lane time from pit entry to pit exit; "
-        "the other cars are assumed to stay out at their gaps to the leader at the end of that lap."
+        f"Net pit loss {float(seconds):.1f} s is an assumption. {NET_PIT_LOSS_NOTE} {observed} "
+        "The other cars are assumed to stay out at their gaps to the leader at the end of that lap."
     )
